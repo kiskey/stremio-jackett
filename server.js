@@ -335,8 +335,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.1.0', // Increment version for expanded categories
-        name: 'Jackett Direct Torrents (Expanded Categories)',
+        version: '1.1.3', // Increment version for refined Jackett queries
+        name: 'Jackett Direct Torrents (Refined Queries)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -410,22 +410,7 @@ app.get('/manifest.json', (req, res) => {
                     description: 'e.g., https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
                     required: false,
                     default: trackerGithubUrl || ''
-                },
-                // You could add LOG_LEVEL here as a configurable option if desired,
-                // but environment variables are generally preferred for logging levels.
-                // {
-                //     key: 'logLevel',
-                //     type: 'select',
-                //     title: 'Logging Level',
-                //     options: [
-                //         { value: 'error', label: 'Error' },
-                //         { value: 'warn', label: 'Warning' },
-                //         { value: 'info', label: 'Info (Default)' },
-                //         { value: 'debug', label: 'Debug (Verbose)' }
-                //     ],
-                //     required: false,
-                //     default: 'info'
-                // }
+                }
             ]
         }
     };
@@ -454,19 +439,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     let resolvedMetadata = {
         resolvedTitle: null,
         resolvedYear: null,
-        alternativeTitles: []
+        alternativeTitles: [] // Primarily populated by TMDb
     };
-    let jackettQueries = [id]; // Start with the ID as a fallback query
+    
+    // Extract base IMDb ID from Stremio's ID (e.g., tt1234567 from tt1234567:1:9)
+    const baseImdbId = id.split(':')[0];
+    log('info', `[METADATA] Attempting to resolve metadata for base IMDb ID: ${baseImdbId}`);
 
     // Attempt to resolve title and year using TMDb or OMDb if it's an IMDb ID
-    if (id.startsWith('tt')) { // Likely an IMDb ID
-        const imdbId = id;
-        log('info', `[METADATA] Attempting to resolve metadata for IMDb ID: ${imdbId}`);
-
-        // 1. Try TMDb API first
+    if (baseImdbId.startsWith('tt')) { // Ensure it's a valid IMDb ID format
+        // 1. Try TMDb API first (preferred for alternative titles)
         if (tmdbApiKey) {
             try {
-                const tmdbResponse = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&api_key=${tmdbApiKey}`);
+                const tmdbResponse = await axios.get(`https://api.themoviedb.org/3/find/${baseImdbId}?external_source=imdb_id&api_key=${tmdbApiKey}`);
                 const data = tmdbResponse.data;
 
                 let mediaResult = null;
@@ -485,8 +470,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                 }
 
                 if (resolvedMetadata.resolvedTitle) {
-                    jackettQueries.unshift(resolvedMetadata.resolvedTitle); // Prioritize resolved title
-                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedMetadata.resolvedTitle}" (${resolvedMetadata.resolvedYear || 'N/A'})`);
+                    log('info', `[METADATA] Resolved IMDb ID ${baseImdbId} to (TMDb): "${resolvedMetadata.resolvedTitle}" (${resolvedMetadata.resolvedYear || 'N/A'})`);
 
                     // Fetch alternative titles from TMDb
                     if (tmdbId) {
@@ -500,44 +484,71 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                             if (altTitlesData.titles && altTitlesData.titles.length > 0) {
                                 resolvedMetadata.alternativeTitles = altTitlesData.titles.map(t => t.title).filter(Boolean);
                                 log('debug', `[METADATA] Found ${resolvedMetadata.alternativeTitles.length} alternative titles from TMDb.`);
-                                // Add alternative titles to Jackett queries as well
-                                jackettQueries.unshift(...resolvedMetadata.alternativeTitles);
                             }
                         } catch (altError) {
-                            log('warn', `[METADATA ERROR] Error fetching alternative titles from TMDb for ${imdbId}: ${altError.message}`);
+                            log('warn', `[METADATA ERROR] Error fetching alternative titles from TMDb for ${baseImdbId}: ${altError.message}`);
                         }
                     }
                 } else {
-                    log('debug', `[METADATA] TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
+                    log('debug', `[METADATA] TMDb found no results for IMDb ID ${baseImdbId} or type mismatch.`);
                 }
             } catch (error) {
-                log('warn', `[METADATA ERROR] Error fetching from TMDb for ${imdbId}: ${error.message}`);
+                log('warn', `[METADATA ERROR] Error fetching from TMDb for ${baseImdbId}: ${error.message}`);
             }
         }
 
         // 2. If TMDb failed or not configured, try OMDb API
         if (!resolvedMetadata.resolvedTitle && omdbApiKey) {
             try {
-                const omdbResponse = await axios.get(`http://www.omdbapi.com/?i=${imdbId}&apikey=${omdbApiKey}`);
+                const omdbResponse = await axios.get(`http://www.omdbapi.com/?i=${baseImdbId}&apikey=${omdbApiKey}`);
                 const data = omdbResponse.data;
 
                 if (data.Response === 'True') {
                     resolvedMetadata.resolvedTitle = data.Title;
                     resolvedMetadata.resolvedYear = parseInt(data.Year, 10);
-                    jackettQueries.unshift(resolvedMetadata.resolvedTitle); // Prioritize resolved title
-                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedMetadata.resolvedTitle}" (${resolvedMetadata.resolvedYear || 'N/A'})`);
+                    log('info', `[METADATA] Resolved IMDb ID ${baseImdbId} to (OMDb): "${resolvedMetadata.resolvedTitle}" (${resolvedMetadata.resolvedYear || 'N/A'})`);
                 } else {
-                    log('debug', `[METADATA] OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
+                    log('debug', `[METADATA] OMDb found no results for IMDb ID ${baseImdbId}: ${data.Error}`);
                 }
             } catch (error) {
-                log('warn', `[METADATA ERROR] Error fetching from OMDb for ${imdbId}: ${error.message}`);
+                log('warn', `[METADATA ERROR] Error fetching from OMDb for ${baseImdbId}: ${error.message}`);
             }
         }
     }
 
+    // --- Constructing Jackett Queries based on resolved metadata ---
+    let jackettQueries = [];
+
+    // 1. Primary Title + Year
+    if (resolvedMetadata.resolvedTitle && resolvedMetadata.resolvedYear) {
+        jackettQueries.push(`${resolvedMetadata.resolvedTitle} ${resolvedMetadata.resolvedYear}`);
+    }
+    // 2. Primary Title only
+    if (resolvedMetadata.resolvedTitle) {
+        jackettQueries.push(resolvedMetadata.resolvedTitle);
+    }
+    // 3. Alternative Titles + Year
+    if (resolvedMetadata.alternativeTitles.length > 0 && resolvedMetadata.resolvedYear) {
+        resolvedMetadata.alternativeTitles.forEach(altTitle => {
+            jackettQueries.push(`${altTitle} ${resolvedMetadata.resolvedYear}`);
+        });
+    }
+    // 4. Alternative Titles only
+    if (resolvedMetadata.alternativeTitles.length > 0) {
+        jackettQueries.push(...resolvedMetadata.alternativeTitles);
+    }
+    // 5. Base IMDb ID
+    if (baseImdbId.startsWith('tt')) { // Ensure it's a valid IMDb ID
+        jackettQueries.push(baseImdbId);
+    }
+    // 6. Original Stremio ID (e.g., tt1234567:1:9) as a final fallback
+    if (id && id.trim() !== '') {
+        jackettQueries.push(id);
+    }
+    
     // Ensure unique queries and remove null/empty strings
     jackettQueries = [...new Set(jackettQueries.filter(q => q && q.trim() !== ''))];
-    log('info', '[JACKETT QUERY] Final Jackett queries for search:', jackettQueries);
+    log('info', '[JACKETT QUERY] Final Jackett queries for search (ordered by priority):', jackettQueries);
 
     try {
         // Fetch trackers first
