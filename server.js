@@ -182,13 +182,21 @@ async function searchJackett(config) {
     let allTorrents = [];
     const seenGuids = new Set(); // To deduplicate torrents across multiple queries
 
+    // Expanded categories for movies and TV shows based on user's input
+    const categories = [
+        '2000', '2030', '2040', '2045', '2060', // Movies and sub-categories
+        '5000', '5030', '5040', '5045', // TV and sub-categories
+        '102000', '102060', '102040', '102030', '102045', // Non-standard movie categories
+        '105000', '105040', '105030', '105045'  // Non-standard TV categories
+    ].join(',');
+
     for (const q of queries) {
         if (!q || q.trim() === '') continue; // Skip empty or whitespace-only queries
 
         const searchParams = new URLSearchParams({
             apikey: jackettApiKey,
             t: 'search', // Type for general search
-            cat: '2000,5000', // Categories for movies (2000) and TV (5000)
+            cat: categories, // Use the expanded list of categories
             q: q
         });
 
@@ -201,7 +209,7 @@ async function searchJackett(config) {
 
 
         const jackettUrl = `${jackettHost.replace(/\/+$/, '')}/api/v2.0/indexers/all/results/torznab/api?${searchParams.toString()}`;
-        log('debug', `Searching Jackett with query "${q}" and year "${year || 'N/A'}", limit ${internalMaxResults || 'N/A'}: ${jackettUrl}`);
+        log('debug', `Searching Jackett with query "${q}" and year "${year || 'N/A'}", limit ${internalMaxResults || 'N/A'}, categories: ${categories}: ${jackettUrl}`);
 
         try {
             const response = await axios.get(jackettUrl);
@@ -327,8 +335,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.9', // Increment version for improved filtering logic
-        name: 'Jackett Direct Torrents (Improved Filtering)',
+        version: '1.1.0', // Increment version for expanded categories
+        name: 'Jackett Direct Torrents (Expanded Categories)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
