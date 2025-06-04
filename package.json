@@ -1,6 +1,6 @@
 {
   "name": "stremio-jackett-addon",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Stremio addon to search Jackett for direct torrents.",
   "main": "server.js",
   "scripts": {
