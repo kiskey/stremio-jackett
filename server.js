@@ -106,11 +106,11 @@ async function parseJackettResponse(xmlString) {
 }
 
 /**
- * Searches Jackett for torrents.
+ * Searches Jackett for torrents using an array of queries.
  * @param {Object} config - Configuration object.
  * @param {string} config.jackettHost - Jackett host URL.
  * @param {string} config.jackettApiKey - Jackett API key.
- * @param {string} config.query - The search query (title).
+ * @param {string[]} config.queries - An array of search queries (titles, IDs).
  * @param {number} [config.year] - The release year (optional).
  * @param {number} [config.maxResults=20] - Maximum number of results to return.
  * @param {number} [config.filterBySeeders=0] - Minimum number of seeders.
@@ -118,46 +118,63 @@ async function parseJackettResponse(xmlString) {
  * @returns {Promise<Array<Object>>} - A promise that resolves to an array of filtered and sorted torrents.
  */
 async function searchJackett(config) {
-    const { jackettHost, jackettApiKey, query, year, maxResults = 20, filterBySeeders = 0, sortBy = 'publishAt' } = config;
+    const { jackettHost, jackettApiKey, queries, year, maxResults = 20, filterBySeeders = 0, sortBy = 'publishAt' } = config;
 
     if (!jackettHost || !jackettApiKey) {
         throw new Error('Jackett host and API key must be provided.');
     }
-
-    const searchParams = new URLSearchParams({
-        apikey: jackettApiKey,
-        t: 'search', // Type for general search
-        cat: '2000,5000', // Categories for movies (2000) and TV (5000)
-        q: query
-    });
-
-    if (year) {
-        searchParams.append('year', year);
+    if (!Array.isArray(queries) || queries.length === 0) {
+        throw new Error('Queries must be a non-empty array.');
     }
 
-    const jackettUrl = `${jackettHost.replace(/\/+$/, '')}/api/v2.0/indexers/all/results/torznab/api?${searchParams.toString()}`;
-    console.log(`Searching Jackett: ${jackettUrl}`);
+    let allTorrents = [];
+    const seenGuids = new Set(); // To deduplicate torrents across multiple queries
 
-    try {
-        const response = await axios.get(jackettUrl);
-        const torrents = await parseJackettResponse(response.data);
+    for (const q of queries) {
+        if (!q || q.trim() === '') continue; // Skip empty or whitespace-only queries
 
-        // Apply filtering
-        let filteredTorrents = torrents.filter(torrent => torrent.seeders >= filterBySeeders);
+        const searchParams = new URLSearchParams({
+            apikey: jackettApiKey,
+            t: 'search', // Type for general search
+            cat: '2000,5000', // Categories for movies (2000) and TV (5000)
+            q: q
+        });
 
-        // Apply sorting
-        if (sortBy === 'seeders') {
-            filteredTorrents.sort((a, b) => b.seeders - a.seeders); // Descending seeders
-        } else { // Default to publishAt
-            filteredTorrents.sort((a, b) => (b.publishAt?.getTime() || 0) - (a.publishAt?.getTime() || 0)); // Descending publishAt
+        if (year) {
+            searchParams.append('year', year);
         }
 
-        // Apply maxResults
-        return filteredTorrents.slice(0, Math.min(maxResults, 20)); // Ensure maxResults doesn't exceed 20
-    } catch (error) {
-        console.error('Error searching Jackett:', error.message);
-        throw new Error(`Failed to search Jackett: ${error.message}`);
+        const jackettUrl = `${jackettHost.replace(/\/+$/, '')}/api/v2.0/indexers/all/results/torznab/api?${searchParams.toString()}`;
+        console.log(`Searching Jackett with query "${q}" and year "${year || 'N/A'}": ${jackettUrl}`);
+
+        try {
+            const response = await axios.get(jackettUrl);
+            const torrents = await parseJackettResponse(response.data);
+
+            torrents.forEach(torrent => {
+                if (!seenGuids.has(torrent.guid)) {
+                    allTorrents.push(torrent);
+                    seenGuids.add(torrent.guid);
+                }
+            });
+        } catch (error) {
+            console.warn(`Error searching Jackett with query "${q}":`, error.message);
+            // Continue to the next query even if one fails
+        }
     }
+
+    // Apply filtering
+    let filteredTorrents = allTorrents.filter(torrent => torrent.seeders >= filterBySeeders);
+
+    // Apply sorting
+    if (sortBy === 'seeders') {
+        filteredTorrents.sort((a, b) => b.seeders - a.seeders); // Descending seeders
+    } else { // Default to publishAt
+        filteredTorrents.sort((a, b) => (b.publishAt?.getTime() || 0) - (a.publishAt?.getTime() || 0)); // Descending publishAt
+    }
+
+    // Apply maxResults
+    return filteredTorrents.slice(0, Math.min(maxResults, 20)); // Ensure maxResults doesn't exceed 20
 }
 
 // Stremio Manifest
@@ -169,7 +186,9 @@ app.get('/manifest.json', (req, res) => {
         maxResults = '20', // Default as string, parse later
         filterBySeeders = '0',
         sortBy = 'publishAt', // Default sort
-        trackerGithubUrl = process.env.TRACKER_GITHUB_URL
+        trackerGithubUrl = process.env.TRACKER_GITHUB_URL,
+        tmdbApiKey = process.env.TMDB_API_KEY, // New config
+        omdbApiKey = process.env.OMDB_API_KEY // New config
     } = req.query;
 
     const parsedMaxResults = Math.min(parseInt(maxResults, 10) || 20, 20); // Max 20 results
@@ -177,9 +196,9 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.0',
-        name: 'Jackett Direct Torrents',
-        description: 'Stremio addon to search Jackett for direct torrents with flexible configuration.',
+        version: '1.0.1', // Increment version
+        name: 'Jackett Direct Torrents (Enhanced)',
+        description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
         catalogs: [], // No catalogs, only direct search
@@ -202,6 +221,20 @@ app.get('/manifest.json', (req, res) => {
                     title: 'Jackett API Key',
                     required: true,
                     default: jackettApiKey || ''
+                },
+                {
+                    key: 'tmdbApiKey',
+                    type: 'text',
+                    title: 'TMDb API Key (optional, for better title resolution)',
+                    required: false,
+                    default: tmdbApiKey || ''
+                },
+                {
+                    key: 'omdbApiKey',
+                    type: 'text',
+                    title: 'OMDb API Key (optional, fallback to TMDb)',
+                    required: false,
+                    default: omdbApiKey || ''
                 },
                 {
                     key: 'maxResults',
@@ -254,87 +287,74 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         maxResults = '20',
         filterBySeeders = '0',
         sortBy = 'publishAt',
-        trackerGithubUrl = process.env.TRACKER_GITHUB_URL
+        trackerGithubUrl = process.env.TRACKER_GITHUB_URL,
+        tmdbApiKey = process.env.TMDB_API_KEY,
+        omdbApiKey = process.env.OMDB_API_KEY
     } = req.query; // Configuration from addon URL
 
     const parsedMaxResults = Math.min(parseInt(maxResults, 10) || 20, 20);
     const parsedFilterBySeeders = parseInt(filterBySeeders, 10) || 0;
 
-    let title = '';
-    let year = null;
+    let resolvedTitle = null;
+    let resolvedYear = null;
+    let jackettQueries = [id]; // Start with the ID as a fallback query
 
-    // Stremio passes ID in format like 'tt1234567' for movies/series
-    // We need to extract title and year for Jackett search
-    // For simplicity, we'll assume the Stremio request provides enough info or use a placeholder
-    // In a real-world scenario, you might use an external API (OMDb/TMDb) to resolve IMDb ID to title/year
-    // For now, we'll try to infer from the ID or rely on Jackett's ability to search broadly.
-    // Stremio's stream request for a specific ID usually includes meta info in the background.
-    // For this example, we'll use a dummy title/year if not explicitly resolved.
-    // A robust solution would involve fetching movie/series metadata.
-    // For now, we'll just use the ID as a query if it's not a common title.
-    // Stremio usually sends the title in the background, but the /stream endpoint only gets type/id.
-    // To get the actual title/year, you'd typically need to make another API call or rely on a catalog.
-    // Given the prompt, we'll make a simplifying assumption: Jackett can often find by IMDb ID or a generic search.
-    // However, Jackett's Torznab API primarily uses 'q' (query string).
-    // So, we need to resolve the IMDb ID to a title.
+    // Attempt to resolve title and year using TMDb or OMDb if it's an IMDb ID
+    if (id.startsWith('tt')) { // Likely an IMDb ID
+        const imdbId = id;
+        console.log(`Attempting to resolve metadata for IMDb ID: ${imdbId}`);
 
-    // Placeholder for title/year resolution.
-    // In a real app, you'd fetch this from a reliable source like TMDB or OMDb.
-    // For now, let's assume the ID is just the IMDb ID and Jackett can handle it to some extent.
-    // Or, more practically, we can assume the user will search by title in Stremio.
-    // Stremio's UI usually shows results based on the title, and then if you click, it sends the ID.
-    // If the addon is only for "direct torrents" and not a catalog, it won't be triggered by title search.
-    // It will be triggered when a user clicks on a movie/series and the addon is active.
+        // 1. Try TMDb API first
+        if (tmdbApiKey) {
+            try {
+                const tmdbResponse = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&api_key=${tmdbApiKey}`);
+                const data = tmdbResponse.data;
 
-    // Let's make a simple dummy title/year for demonstration.
-    // In a production addon, you'd fetch this from an external API.
-    // Example: If ID is 'tt0133093' (The Matrix), you'd fetch its title and year.
-    // For this example, we'll construct a generic query based on the ID.
-    // Jackett's Torznab API usually expects a text query.
-    // So, we'll use the ID as the query, hoping Jackett can resolve it.
-    // A better approach would be to have a separate metadata resolver.
+                let mediaResult = null;
+                if (type === 'movie' && data.movie_results && data.movie_results.length > 0) {
+                    mediaResult = data.movie_results[0];
+                    resolvedTitle = mediaResult.title;
+                    resolvedYear = mediaResult.release_date ? parseInt(mediaResult.release_date.substring(0, 4), 10) : null;
+                } else if (type === 'series' && data.tv_results && data.tv_results.length > 0) {
+                    mediaResult = data.tv_results[0];
+                    resolvedTitle = mediaResult.name;
+                    resolvedYear = mediaResult.first_air_date ? parseInt(mediaResult.first_air_date.substring(0, 4), 10) : null;
+                }
 
-    // Let's try to parse the ID for a basic query.
-    // Stremio IDs are usually like 'tt1234567' for movies/series.
-    // We'll use the ID directly as the search query for Jackett.
-    // This might not be ideal for all Jackett indexers, but it's a starting point.
-    let searchQuery = id; // Default to using the ID as the search query
-    if (id.startsWith('tt')) {
-        // This is an IMDb ID. A robust solution would fetch the title/year.
-        // For now, we'll pass the ID directly to Jackett, hoping some indexers can handle it,
-        // or rely on the fact that Stremio might implicitly pass other info.
-        // Or, we can make a dummy API call to get the title.
-        // Let's use a very simple mock for title/year resolution.
-        // In a real app, you'd use OMDb API or TMDb API.
-        console.log(`Attempting to resolve title/year for IMDb ID: ${id}`);
-        try {
-            // This is a placeholder. You would replace this with an actual API call.
-            // Example using OMDb API (requires API key):
-            // const omdbApiKey = process.env.OMDB_API_KEY; // You'd need to get one
-            // if (omdbApiKey) {
-            //     const omdbResponse = await axios.get(`http://www.omdbapi.com/?i=${id}&apikey=${omdbApiKey}`);
-            //     if (omdbResponse.data && omdbResponse.data.Response === 'True') {
-            //         title = omdbResponse.data.Title;
-            //         year = parseInt(omdbResponse.data.Year, 10);
-            //         searchQuery = title; // Use the resolved title for Jackett
-            //         console.log(`Resolved ID ${id} to: ${title} (${year})`);
-            //     }
-            // } else {
-            //     console.warn('OMDb API key not provided. Using IMDb ID as search query.');
-            // }
-            // For now, we'll just use the ID as the query.
-            // If the user wants a more robust solution, they'd need to provide an OMDb/TMDb API key.
-            searchQuery = id; // Jackett indexers might be able to handle IMDb IDs directly or convert them.
-        } catch (error) {
-            console.error(`Error resolving title/year for ${id}:`, error.message);
-            searchQuery = id; // Fallback to using ID as query
+                if (resolvedTitle) {
+                    jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
+                    console.log(`Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                } else {
+                    console.log(`TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
+                }
+            } catch (error) {
+                console.warn(`Error fetching from TMDb for ${imdbId}:`, error.message);
+            }
         }
-    } else {
-        // If it's not an IMDb ID, it might be a generic search term from a catalog.
-        // For this addon, we are primarily focusing on 'tt' IDs from Stremio.
-        // If it's another ID format, we might need to adjust the logic.
-        searchQuery = id;
+
+        // 2. If TMDb failed or not configured, try OMDb API
+        if (!resolvedTitle && omdbApiKey) {
+            try {
+                const omdbResponse = await axios.get(`http://www.omdbapi.com/?i=${imdbId}&apikey=${omdbApiKey}`);
+                const data = omdbResponse.data;
+
+                if (data.Response === 'True') {
+                    resolvedTitle = data.Title;
+                    resolvedYear = parseInt(data.Year, 10);
+                    jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
+                    console.log(`Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                } else {
+                    console.log(`OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
+                }
+            } catch (error) {
+                console.warn(`Error fetching from OMDb for ${imdbId}:`, error.message);
+            }
+        }
     }
+
+    // Ensure unique queries and remove null/empty strings
+    jackettQueries = [...new Set(jackettQueries.filter(q => q && q.trim() !== ''))];
+    console.log('Final Jackett queries for search:', jackettQueries);
 
     try {
         // Fetch trackers first
@@ -343,8 +363,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         const jackettConfig = {
             jackettHost,
             jackettApiKey,
-            query: searchQuery,
-            year: year, // Pass resolved year if available
+            queries: jackettQueries, // Pass the array of queries
+            year: resolvedYear, // Pass resolved year if available
             maxResults: parsedMaxResults,
             filterBySeeders: parsedFilterBySeeders,
             sortBy
