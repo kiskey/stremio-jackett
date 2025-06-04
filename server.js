@@ -10,6 +10,38 @@ const cors = require('cors'); // Import the cors middleware
 const app = express();
 const PORT = process.env.PORT || 80;
 
+// --- Configurable Logging Setup ---
+const LOG_LEVELS = {
+    'error': 0,
+    'warn': 1,
+    'info': 2,
+    'debug': 3
+};
+// Get log level from environment variable, default to 'info'
+const currentLogLevel = LOG_LEVELS[process.env.LOG_LEVEL?.toLowerCase()] || LOG_LEVELS['info'];
+
+/**
+ * Custom logging function based on configured log level.
+ * @param {string} level - The log level ('error', 'warn', 'info', 'debug').
+ * @param {string} message - The log message.
+ * @param {any[]} optionalParams - Additional parameters to log.
+ */
+function log(level, message, ...optionalParams) {
+    if (LOG_LEVELS[level] <= currentLogLevel) {
+        const timestamp = new Date().toISOString();
+        const formattedMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
+        if (level === 'error') {
+            console.error(formattedMessage, ...optionalParams);
+        } else if (level === 'warn') {
+            console.warn(formattedMessage, ...optionalParams);
+        } else {
+            console.log(formattedMessage, ...optionalParams);
+        }
+    }
+}
+// --- End Configurable Logging Setup ---
+
+
 // Enable CORS for all origins
 // This is crucial for Stremio to be able to fetch resources from your addon.
 app.use(cors());
@@ -37,18 +69,18 @@ function getInfoHashFromMagnet(magnetUri) {
  */
 async function fetchTrackers(githubUrl) {
     if (!githubUrl) {
-        console.warn('No trackerGithubUrl provided. Skipping tracker fetching.');
+        log('warn', 'No trackerGithubUrl provided. Skipping tracker fetching.');
         return [];
     }
 
     const now = Date.now();
     if (cachedTrackers.length > 0 && (now - lastTrackerFetch < TRACKER_CACHE_DURATION)) {
-        console.log('Using cached trackers.');
+        log('debug', 'Using cached trackers.');
         return cachedTrackers;
     }
 
     try {
-        console.log(`Fetching trackers from: ${githubUrl}`);
+        log('info', `Fetching trackers from: ${githubUrl}`);
         const response = await axios.get(githubUrl);
         const trackers = response.data.split('\n')
             .map(line => line.trim())
@@ -56,10 +88,10 @@ async function fetchTrackers(githubUrl) {
         
         cachedTrackers = trackers;
         lastTrackerFetch = now;
-        console.log(`Successfully fetched ${trackers.length} trackers.`);
+        log('info', `Successfully fetched ${trackers.length} trackers.`);
         return trackers;
     } catch (error) {
-        console.error(`Error fetching trackers from ${githubUrl}:`, error.message);
+        log('error', `Error fetching trackers from ${githubUrl}:`, error.message);
         // Fallback to previous cached trackers if available, or empty array
         return cachedTrackers.length > 0 ? cachedTrackers : [];
     }
@@ -162,7 +194,7 @@ async function searchJackett(config) {
         }
 
         const jackettUrl = `${jackettHost.replace(/\/+$/, '')}/api/v2.0/indexers/all/results/torznab/api?${searchParams.toString()}`;
-        console.log(`Searching Jackett with query "${q}" and year "${year || 'N/A'}": ${jackettUrl}`);
+        log('debug', `Searching Jackett with query "${q}" and year "${year || 'N/A'}": ${jackettUrl}`);
 
         try {
             const response = await axios.get(jackettUrl);
@@ -175,7 +207,7 @@ async function searchJackett(config) {
                 }
             });
         } catch (error) {
-            console.warn(`Error searching Jackett with query "${q}":`, error.message);
+            log('warn', `Error searching Jackett with query "${q}":`, error.message);
             // Continue to the next query even if one fails
         }
     }
@@ -213,8 +245,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.6', // Increment version for Stremio stream object fix
-        name: 'Jackett Direct Torrents (Stremio Fix)',
+        version: '1.0.7', // Increment version for configurable logging
+        name: 'Jackett Direct Torrents (Configurable Logging)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -288,7 +320,22 @@ app.get('/manifest.json', (req, res) => {
                     description: 'e.g., https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
                     required: false,
                     default: trackerGithubUrl || ''
-                }
+                },
+                // You could add LOG_LEVEL here as a configurable option if desired,
+                // but environment variables are generally preferred for logging levels.
+                // {
+                //     key: 'logLevel',
+                //     type: 'select',
+                //     title: 'Logging Level',
+                //     options: [
+                //         { value: 'error', label: 'Error' },
+                //         { value: 'warn', label: 'Warning' },
+                //         { value: 'info', label: 'Info (Default)' },
+                //         { value: 'debug', label: 'Debug (Verbose)' }
+                //     ],
+                //     required: false,
+                //     default: 'info'
+                // }
             ]
         }
     };
@@ -298,7 +345,7 @@ app.get('/manifest.json', (req, res) => {
 // Stremio Stream Endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
     const { type, id } = req.params;
-    console.log(`[STREAM REQUEST] Received request for Type: ${type}, ID: ${id}`);
+    log('info', `[STREAM REQUEST] Received request for Type: ${type}, ID: ${id}`);
 
     const {
         jackettHost = process.env.JACKETT_HOST,
@@ -321,7 +368,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     // Attempt to resolve title and year using TMDb or OMDb if it's an IMDb ID
     if (id.startsWith('tt')) { // Likely an IMDb ID
         const imdbId = id;
-        console.log(`[METADATA] Attempting to resolve metadata for IMDb ID: ${imdbId}`);
+        log('info', `[METADATA] Attempting to resolve metadata for IMDb ID: ${imdbId}`);
 
         // 1. Try TMDb API first
         if (tmdbApiKey) {
@@ -342,12 +389,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
                 if (resolvedTitle) {
                     jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
-                    console.log(`[METADATA] Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
                 } else {
-                    console.log(`[METADATA] TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
+                    log('debug', `[METADATA] TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
                 }
             } catch (error) {
-                console.warn(`[METADATA ERROR] Error fetching from TMDb for ${imdbId}:`, error.message);
+                log('warn', `[METADATA ERROR] Error fetching from TMDb for ${imdbId}: ${error.message}`);
             }
         }
 
@@ -361,24 +408,24 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                     resolvedTitle = data.Title;
                     resolvedYear = parseInt(data.Year, 10);
                     jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
-                    console.log(`[METADATA] Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
                 } else {
-                    console.log(`[METADATA] OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
+                    log('debug', `[METADATA] OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
                 }
             } catch (error) {
-                console.warn(`[METADATA ERROR] Error fetching from OMDb for ${imdbId}:`, error.message);
+                log('warn', `[METADATA ERROR] Error fetching from OMDb for ${imdbId}: ${error.message}`);
             }
         }
     }
 
     // Ensure unique queries and remove null/empty strings
     jackettQueries = [...new Set(jackettQueries.filter(q => q && q.trim() !== ''))];
-    console.log('[JACKETT QUERY] Final Jackett queries for search:', jackettQueries);
+    log('info', '[JACKETT QUERY] Final Jackett queries for search:', jackettQueries);
 
     try {
         // Fetch trackers first
         const trackers = await fetchTrackers(trackerGithubUrl);
-        console.log(`[TRACKERS] Using ${trackers.length} trackers.`);
+        log('info', `[TRACKERS] Using ${trackers.length} trackers.`);
 
         const jackettConfig = {
             jackettHost,
@@ -391,14 +438,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         };
 
         const torrents = await searchJackett(jackettConfig);
-        console.log(`[JACKETT RESULTS] Found ${torrents.length} torrents from Jackett.`);
-        torrents.forEach((t, i) => console.log(`  Torrent ${i + 1}: ${t.title} (Seeders: ${t.seeders}, Link: ${t.link ? t.link.substring(0, 60) + '...' : 'N/A'})`));
+        log('info', `[JACKETT RESULTS] Found ${torrents.length} torrents from Jackett.`);
+        torrents.forEach((t, i) => log('debug', `  Torrent ${i + 1}: ${t.title} (Seeders: ${t.seeders}, Link: ${t.link ? t.link.substring(0, 60) + '...' : 'N/A'})`));
 
 
         const streams = torrents.map(torrent => {
             const infoHash = getInfoHashFromMagnet(torrent.link);
             if (!infoHash) {
-                console.warn(`[STREAM ERROR] Could not extract infoHash for torrent: ${torrent.title}. Skipping stream.`);
+                log('warn', `[STREAM ERROR] Could not extract infoHash for torrent: ${torrent.title}. Skipping stream.`);
                 return null; // Skip this stream if infoHash is not found
             }
 
@@ -406,7 +453,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             const streamSources = trackers.map(t => `tracker:${t}`);
             streamSources.push(`dht:${infoHash}`); // Add DHT source
 
-            console.log(`[STREAM OUTPUT] Processing torrent "${torrent.title}". InfoHash: ${infoHash}, Sources: ${JSON.stringify(streamSources)}`);
+            log('debug', `[STREAM OUTPUT] Processing torrent "${torrent.title}". InfoHash: ${infoHash}, Sources: ${JSON.stringify(streamSources)}`);
 
             return {
                 name: 'Jackett', // Display name of the addon
@@ -417,10 +464,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             };
         }).filter(s => s !== null); // Filter out any null streams (where infoHash extraction failed)
 
-        console.log(`[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio. Full streams array:`, JSON.stringify(streams, null, 2));
+        log('info', `[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio.`);
+        log('debug', `[STREMIO RESPONSE] Full streams array:`, JSON.stringify(streams, null, 2));
         res.json({ streams });
     } catch (error) {
-        console.error('[GLOBAL ERROR] Error in /stream endpoint:', error.message);
+        log('error', '[GLOBAL ERROR] Error in /stream endpoint:', error.message);
         res.status(500).json({ streams: [], error: error.message });
     }
 });
@@ -432,9 +480,8 @@ app.get('/health', (req, res) => {
 
 // Start the server
 app.listen(PORT, () => {
-    console.log(`Stremio Jackett Addon listening on port ${PORT}`);
+    log('info', `Stremio Jackett Addon listening on port ${PORT}`);
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
-
 
