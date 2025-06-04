@@ -207,7 +207,7 @@ async function searchJackett(config) {
                 }
             });
         } catch (error) {
-            log('warn', `Error searching Jackett with query "${q}":`, error.message);
+            log('warn', `Error searching Jackett with query "${q}": ${error.message}`);
             // Continue to the next query even if one fails
         }
     }
@@ -224,6 +224,81 @@ async function searchJackett(config) {
 
     // Apply maxResults
     return filteredTorrents.slice(0, Math.min(maxResults, 20)); // Ensure maxResults doesn't exceed 20
+}
+
+/**
+ * Normalizes a string for comparison (lowercase, remove non-alphanumeric except spaces).
+ * @param {string} str - The string to normalize.
+ * @returns {string} - The normalized string.
+ */
+function normalizeString(str) {
+    return str.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+}
+
+/**
+ * Checks if a torrent is relevant based on resolved metadata (title and year).
+ * @param {Object} torrent - The torrent object from Jackett.
+ * @param {Object} resolvedMetadata - Object containing resolvedTitle, resolvedYear, and alternativeTitles.
+ * @returns {boolean} - True if the torrent is relevant, false otherwise.
+ */
+function isTorrentRelevant(torrent, resolvedMetadata) {
+    const { resolvedTitle, resolvedYear, alternativeTitles = [] } = resolvedMetadata;
+    const torrentTitleNormalized = normalizeString(torrent.title);
+
+    // If no metadata is resolved, assume relevant (fallback behavior)
+    if (!resolvedTitle && !resolvedYear) {
+        log('debug', `No metadata resolved for relevance check. Assuming torrent "${torrent.title}" is relevant.`);
+        return true;
+    }
+
+    let titleMatch = false;
+    const allRelevantTitles = [resolvedTitle, ...alternativeTitles].filter(Boolean).map(normalizeString);
+
+    for (const relevantTitle of allRelevantTitles) {
+        // Check for exact match or strong substring match
+        if (torrentTitleNormalized.includes(relevantTitle) || relevantTitle.includes(torrentTitleNormalized)) {
+            titleMatch = true;
+            break;
+        }
+    }
+
+    // Attempt to parse year from torrent title if not available from publishAt
+    let torrentYear = null;
+    if (torrent.publishAt) {
+        torrentYear = torrent.publishAt.getFullYear();
+    } else {
+        const yearMatch = torrent.title.match(/\b(19|20)\d{2}\b/); // Basic year regex
+        if (yearMatch) {
+            torrentYear = parseInt(yearMatch[0], 10);
+        }
+    }
+
+    let yearMatch = false;
+    if (resolvedYear) {
+        if (torrentYear) {
+            // Allow a small tolerance for year (e.g., +/- 1 year)
+            if (Math.abs(resolvedYear - torrentYear) <= 1) {
+                yearMatch = true;
+            }
+        } else {
+            // If torrent year is unknown, but resolved year exists, it's a weak match
+            // We might consider this true if title matches strongly, or false if year is critical.
+            // For now, let's require a year match if resolvedYear is present.
+            yearMatch = false;
+        }
+    } else {
+        // If resolvedYear is not available, don't filter by year
+        yearMatch = true;
+    }
+
+    const isRelevant = titleMatch && yearMatch;
+    if (!isRelevant) {
+        log('debug', `Filtering out irrelevant torrent: "${torrent.title}" (TitleMatch: ${titleMatch}, YearMatch: ${yearMatch}, Resolved: "${resolvedTitle}" (${resolvedYear}))`);
+    } else {
+        log('debug', `Keeping relevant torrent: "${torrent.title}"`);
+    }
+
+    return isRelevant;
 }
 
 // Stremio Manifest
@@ -245,8 +320,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.7', // Increment version for configurable logging
-        name: 'Jackett Direct Torrents (Configurable Logging)',
+        version: '1.0.8', // Increment version for relevance filtering
+        name: 'Jackett Direct Torrents (Relevance Filter)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -361,8 +436,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const parsedMaxResults = Math.min(parseInt(maxResults, 10) || 20, 20);
     const parsedFilterBySeeders = parseInt(filterBySeeders, 10) || 0;
 
-    let resolvedTitle = null;
-    let resolvedYear = null;
+    let resolvedMetadata = {
+        resolvedTitle: null,
+        resolvedYear: null,
+        alternativeTitles: []
+    };
     let jackettQueries = [id]; // Start with the ID as a fallback query
 
     // Attempt to resolve title and year using TMDb or OMDb if it's an IMDb ID
@@ -377,19 +455,43 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                 const data = tmdbResponse.data;
 
                 let mediaResult = null;
+                let tmdbId = null;
+
                 if (type === 'movie' && data.movie_results && data.movie_results.length > 0) {
                     mediaResult = data.movie_results[0];
-                    resolvedTitle = mediaResult.title;
-                    resolvedYear = mediaResult.release_date ? parseInt(mediaResult.release_date.substring(0, 4), 10) : null;
+                    resolvedMetadata.resolvedTitle = mediaResult.title;
+                    resolvedMetadata.resolvedYear = mediaResult.release_date ? parseInt(mediaResult.release_date.substring(0, 4), 10) : null;
+                    tmdbId = mediaResult.id;
                 } else if (type === 'series' && data.tv_results && data.tv_results.length > 0) {
                     mediaResult = data.tv_results[0];
-                    resolvedTitle = mediaResult.name;
-                    resolvedYear = mediaResult.first_air_date ? parseInt(mediaResult.first_air_date.substring(0, 4), 10) : null;
+                    resolvedMetadata.resolvedTitle = mediaResult.name;
+                    resolvedMetadata.resolvedYear = mediaResult.first_air_date ? parseInt(mediaResult.first_air_date.substring(0, 4), 10) : null;
+                    tmdbId = mediaResult.id;
                 }
 
-                if (resolvedTitle) {
-                    jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
-                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                if (resolvedMetadata.resolvedTitle) {
+                    jackettQueries.unshift(resolvedMetadata.resolvedTitle); // Prioritize resolved title
+                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedMetadata.resolvedTitle}" (${resolvedMetadata.resolvedYear || 'N/A'})`);
+
+                    // Fetch alternative titles from TMDb
+                    if (tmdbId) {
+                        try {
+                            const altTitlesEndpoint = type === 'movie' ?
+                                `https://api.themoviedb.org/3/movie/${tmdbId}/alternative_titles?api_key=${tmdbApiKey}` :
+                                `https://api.themoviedb.org/3/tv/${tmdbId}/alternative_titles?api_key=${tmdbApiKey}`;
+                            const altTitlesResponse = await axios.get(altTitlesEndpoint);
+                            const altTitlesData = altTitlesResponse.data;
+
+                            if (altTitlesData.titles && altTitlesData.titles.length > 0) {
+                                resolvedMetadata.alternativeTitles = altTitlesData.titles.map(t => t.title).filter(Boolean);
+                                log('debug', `[METADATA] Found ${resolvedMetadata.alternativeTitles.length} alternative titles from TMDb.`);
+                                // Add alternative titles to Jackett queries as well
+                                jackettQueries.unshift(...resolvedMetadata.alternativeTitles);
+                            }
+                        } catch (altError) {
+                            log('warn', `[METADATA ERROR] Error fetching alternative titles from TMDb for ${imdbId}: ${altError.message}`);
+                        }
+                    }
                 } else {
                     log('debug', `[METADATA] TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
                 }
@@ -399,16 +501,16 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         }
 
         // 2. If TMDb failed or not configured, try OMDb API
-        if (!resolvedTitle && omdbApiKey) {
+        if (!resolvedMetadata.resolvedTitle && omdbApiKey) {
             try {
                 const omdbResponse = await axios.get(`http://www.omdbapi.com/?i=${imdbId}&apikey=${omdbApiKey}`);
                 const data = omdbResponse.data;
 
                 if (data.Response === 'True') {
-                    resolvedTitle = data.Title;
-                    resolvedYear = parseInt(data.Year, 10);
-                    jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
-                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                    resolvedMetadata.resolvedTitle = data.Title;
+                    resolvedMetadata.resolvedYear = parseInt(data.Year, 10);
+                    jackettQueries.unshift(resolvedMetadata.resolvedTitle); // Prioritize resolved title
+                    log('info', `[METADATA] Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedMetadata.resolvedTitle}" (${resolvedMetadata.resolvedYear || 'N/A'})`);
                 } else {
                     log('debug', `[METADATA] OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
                 }
@@ -431,15 +533,25 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             jackettHost,
             jackettApiKey,
             queries: jackettQueries, // Pass the array of queries
-            year: resolvedYear, // Pass resolved year if available
+            year: resolvedMetadata.resolvedYear, // Pass resolved year if available
             maxResults: parsedMaxResults,
             filterBySeeders: parsedFilterBySeeders,
             sortBy
         };
 
-        const torrents = await searchJackett(jackettConfig);
-        log('info', `[JACKETT RESULTS] Found ${torrents.length} torrents from Jackett.`);
-        torrents.forEach((t, i) => log('debug', `  Torrent ${i + 1}: ${t.title} (Seeders: ${t.seeders}, Link: ${t.link ? t.link.substring(0, 60) + '...' : 'N/A'})`));
+        let torrents = await searchJackett(jackettConfig);
+        log('info', `[JACKETT RESULTS] Found ${torrents.length} initial torrents from Jackett.`);
+        torrents.forEach((t, i) => log('debug', `  Initial Torrent ${i + 1}: ${t.title} (Seeders: ${t.seeders}, Link: ${t.link ? t.link.substring(0, 60) + '...' : 'N/A'})`));
+
+        // --- Post-filtering based on resolved metadata ---
+        if (resolvedMetadata.resolvedTitle || resolvedMetadata.resolvedYear) {
+            const relevantTorrents = torrents.filter(torrent => isTorrentRelevant(torrent, resolvedMetadata));
+            log('info', `[RELEVANCE FILTER] Filtered ${torrents.length - relevantTorrents.length} irrelevant torrents. Remaining: ${relevantTorrents.length}`);
+            torrents = relevantTorrents;
+        } else {
+            log('info', '[RELEVANCE FILTER] No resolved metadata, skipping relevance filter.');
+        }
+        // --- End Post-filtering ---
 
 
         const streams = torrents.map(torrent => {
@@ -484,4 +596,3 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
-
