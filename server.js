@@ -20,6 +20,16 @@ let lastTrackerFetch = 0;
 const TRACKER_CACHE_DURATION = 1 * 60 * 60 * 1000; // 1 hour in milliseconds
 
 /**
+ * Extracts the info hash from a magnet URI.
+ * @param {string} magnetUri - The magnet URI.
+ * @returns {string|null} - The info hash or null if not found.
+ */
+function getInfoHashFromMagnet(magnetUri) {
+    const match = magnetUri.match(/xt=urn:btih:([a-fA-F0-9]{40})/);
+    return match ? match[1] : null;
+}
+
+/**
  * Fetches the list of best trackers from a GitHub URL.
  * The URL should point to a raw text file where each line is a tracker URL.
  * @param {string} githubUrl - The raw GitHub URL to the trackers file.
@@ -201,8 +211,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.3', // Increment version for logging changes
-        name: 'Jackett Direct Torrents (Enhanced Logging)',
+        version: '1.0.4', // Increment version for infoHash fix
+        name: 'Jackett Direct Torrents (InfoHash Fix)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -388,21 +398,28 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             if (trackers.length > 0) {
                 magnetLink = appendTrackersToMagnet(magnetLink, trackers);
             }
-            console.log(`[STREAM OUTPUT] Processing torrent "${torrent.title}". Final Magnet Link: ${magnetLink ? magnetLink.substring(0, 100) + '...' : 'N/A'}`);
 
+            const infoHash = getInfoHashFromMagnet(magnetLink);
+            if (!infoHash) {
+                console.warn(`[STREAM ERROR] Could not extract infoHash for torrent: ${torrent.title}. Skipping stream.`);
+                return null; // Skip this stream if infoHash is not found
+            }
+
+            console.log(`[STREAM OUTPUT] Processing torrent "${torrent.title}". Final Magnet Link: ${magnetLink ? magnetLink.substring(0, 100) + '...' : 'N/A'}, InfoHash: ${infoHash}`);
 
             return {
                 name: 'Jackett', // Display name of the addon
                 title: `${torrent.title} (${torrent.seeders} Seeders)`,
-                url: magnetLink
+                url: magnetLink,
+                infoHash: infoHash // Explicitly include infoHash
             };
-        });
+        }).filter(s => s !== null); // Filter out any null streams (where infoHash extraction failed)
 
         console.log(`[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio. Full streams array:`, JSON.stringify(streams, null, 2));
         res.json({ streams });
     } catch (error) {
         console.error('[GLOBAL ERROR] Error in /stream endpoint:', error.message);
-        res.status(500).json({ streams: [], error: error.message });
+        res.status(500).json({ streams: [], error: error: error.message });
     }
 });
 
@@ -417,3 +434,4 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
+
