@@ -1,5 +1,5 @@
 # Dockerfile
-# --- Stage 1: Builder ---
+# --- Stage 1: Builder -
 # This stage installs all dependencies, including build tools needed for native modules.
 FROM node:18-alpine AS builder
 
