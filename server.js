@@ -201,8 +201,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.2', // Increment version for this fix
-        name: 'Jackett Direct Torrents (CORS Fix)',
+        version: '1.0.3', // Increment version for logging changes
+        name: 'Jackett Direct Torrents (Enhanced Logging)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -286,6 +286,8 @@ app.get('/manifest.json', (req, res) => {
 // Stremio Stream Endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
     const { type, id } = req.params;
+    console.log(`[STREAM REQUEST] Received request for Type: ${type}, ID: ${id}`);
+
     const {
         jackettHost = process.env.JACKETT_HOST,
         jackettApiKey = process.env.JACKETT_API_KEY,
@@ -307,7 +309,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     // Attempt to resolve title and year using TMDb or OMDb if it's an IMDb ID
     if (id.startsWith('tt')) { // Likely an IMDb ID
         const imdbId = id;
-        console.log(`Attempting to resolve metadata for IMDb ID: ${imdbId}`);
+        console.log(`[METADATA] Attempting to resolve metadata for IMDb ID: ${imdbId}`);
 
         // 1. Try TMDb API first
         if (tmdbApiKey) {
@@ -328,12 +330,12 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
                 if (resolvedTitle) {
                     jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
-                    console.log(`Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                    console.log(`[METADATA] Resolved IMDb ID ${imdbId} to (TMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
                 } else {
-                    console.log(`TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
+                    console.log(`[METADATA] TMDb found no results for IMDb ID ${imdbId} or type mismatch.`);
                 }
             } catch (error) {
-                console.warn(`Error fetching from TMDb for ${imdbId}:`, error.message);
+                console.warn(`[METADATA ERROR] Error fetching from TMDb for ${imdbId}:`, error.message);
             }
         }
 
@@ -347,23 +349,24 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                     resolvedTitle = data.Title;
                     resolvedYear = parseInt(data.Year, 10);
                     jackettQueries.unshift(resolvedTitle); // Prioritize resolved title
-                    console.log(`Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
+                    console.log(`[METADATA] Resolved IMDb ID ${imdbId} to (OMDb): "${resolvedTitle}" (${resolvedYear || 'N/A'})`);
                 } else {
-                    console.log(`OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
+                    console.log(`[METADATA] OMDb found no results for IMDb ID ${imdbId}: ${data.Error}`);
                 }
             } catch (error) {
-                console.warn(`Error fetching from OMDb for ${imdbId}:`, error.message);
+                console.warn(`[METADATA ERROR] Error fetching from OMDb for ${imdbId}:`, error.message);
             }
         }
     }
 
     // Ensure unique queries and remove null/empty strings
     jackettQueries = [...new Set(jackettQueries.filter(q => q && q.trim() !== ''))];
-    console.log('Final Jackett queries for search:', jackettQueries);
+    console.log('[JACKETT QUERY] Final Jackett queries for search:', jackettQueries);
 
     try {
         // Fetch trackers first
         const trackers = await fetchTrackers(trackerGithubUrl);
+        console.log(`[TRACKERS] Using ${trackers.length} trackers.`);
 
         const jackettConfig = {
             jackettHost,
@@ -376,12 +379,17 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         };
 
         const torrents = await searchJackett(jackettConfig);
+        console.log(`[JACKETT RESULTS] Found ${torrents.length} torrents from Jackett.`);
+        torrents.forEach((t, i) => console.log(`  Torrent ${i + 1}: ${t.title} (Seeders: ${t.seeders}, Link: ${t.link ? t.link.substring(0, 60) + '...' : 'N/A'})`));
+
 
         const streams = torrents.map(torrent => {
             let magnetLink = torrent.link;
             if (trackers.length > 0) {
                 magnetLink = appendTrackersToMagnet(magnetLink, trackers);
             }
+            console.log(`[STREAM OUTPUT] Processing torrent "${torrent.title}". Final Magnet Link: ${magnetLink ? magnetLink.substring(0, 100) + '...' : 'N/A'}`);
+
 
             return {
                 name: 'Jackett', // Display name of the addon
@@ -390,9 +398,10 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             };
         });
 
+        console.log(`[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio. Full streams array:`, JSON.stringify(streams, null, 2));
         res.json({ streams });
     } catch (error) {
-        console.error('Error in /stream endpoint:', error.message);
+        console.error('[GLOBAL ERROR] Error in /stream endpoint:', error.message);
         res.status(500).json({ streams: [], error: error.message });
     }
 });
@@ -408,5 +417,3 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
-
-
