@@ -1,0 +1,49 @@
+How to Configure the Addon (via Stremio's UI)
+
+The configuration options you defined in the manifest.json (like jackettHost, jackettApiKey, tmdbApiKey, maxResults, etc.) are automatically presented to you by Stremio when you install the addon. You don't need to build a separate web page for configuration.
+
+Here's the step-by-step process:
+
+    Ensure your Stremio Addon is Running:
+        If running locally: Make sure you have started your Node.js server (e.g., npm start) and it's accessible at http://localhost:80.
+        If deployed (e.g., on a VPS, Heroku, Docker Hub): Ensure your Docker container is running and exposed to the internet, and you have its public URL (e.g., https://your-addon-domain.com).
+
+    Get Your Addon's Manifest URL:
+    Your addon serves its manifest at the /manifest.json endpoint.
+        Local URL: http://localhost:80/manifest.json
+        Deployed URL: https://your-addon-domain.com/manifest.json (replace your-addon-domain.com with your actual domain or IP address).
+
+    Open Stremio: Launch the Stremio application on your device.
+
+    Navigate to Addons:
+        In Stremio, look for the "Addons" or "Puzzle Piece" icon, usually on the left sidebar. Click on it.
+
+    Install a Custom Addon:
+        On the Addons screen, scroll down or look for an option like "Install a Custom Addon" or "Addon Settings" -> "Install from URL".
+
+    Paste the Manifest URL:
+        A dialog box will appear asking for the Addon URL. Paste the manifest URL you identified in step 2 (e.g., http://localhost:80/manifest.json).
+        Click "Install" or "Load".
+
+    Configure the Addon in Stremio's UI:
+        Stremio will now fetch your manifest.json. Because your manifest includes the behaviorHints.configuration block, Stremio will automatically display a form with input fields for all your configurable options (Jackett Host, API Key, TMDb Key, Max Results, etc.).
+        Fill in these details carefully:
+            Jackett Host URL: The full URL to your Jackett instance (e.g., http://192.168.1.100:9117 or http://localhost:9117 if Jackett is on the same machine as Stremio).
+            Jackett API Key: Your API key from your Jackett dashboard.
+            TMDb API Key (Optional): Your TMDb API key for better title resolution.
+            OMDb API Key (Optional): Your OMDb API key as a fallback for title resolution.
+            Max Results: The maximum number of torrents to display (default 20).
+            Minimum Seeders: Filter results by a minimum number of seeders.
+            Sort By: Choose between "Recently Published" or "Most Seeders".
+            GitHub Raw URL for Trackers (Optional): The raw URL to your tracker list (e.g., https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt).
+        Once you've filled in all the desired configurations, click "Install" again in the Stremio dialog.
+
+How Stremio Uses the Configuration
+
+When you configure the addon this way, Stremio essentially appends your chosen configuration values as query parameters to every request it makes to your addon.
+
+For example, if your base addon URL is http://localhost:80, and you configured jackettHost as http://192.168.1.100:9117 and jackettApiKey as ABCDEF, when Stremio requests streams for a movie (e.g., tt1234567), it will make a call like:
+
+http://localhost:80/stream/movie/tt1234567.json?jackettHost=http%3A%2F%2F192.168.1.100%3A9117&jackettApiKey=ABCDEF&...
+
+Your server.js then reads these query parameters (req.query) to get the configuration for that specific request. This is why the configuration is "flexible" and tied to the addon's URL.
