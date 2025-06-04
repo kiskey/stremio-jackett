@@ -211,8 +211,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.4', // Increment version for infoHash fix
-        name: 'Jackett Direct Torrents (InfoHash Fix)',
+        version: '1.0.5', // Increment version for syntax fix
+        name: 'Jackett Direct Torrents (Syntax Fix)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -419,7 +419,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         res.json({ streams });
     } catch (error) {
         console.error('[GLOBAL ERROR] Error in /stream endpoint:', error.message);
-        res.status(500).json({ streams: [], error: error: error.message });
+        // Corrected line: removed the duplicate 'error:'
+        res.status(500).json({ streams: [], error: error.message });
     }
 });
 
@@ -434,4 +435,3 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
-
