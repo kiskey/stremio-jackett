@@ -67,6 +67,8 @@ async function fetchTrackers(githubUrl) {
 
 /**
  * Appends a list of trackers to a magnet URI.
+ * This function is now primarily for internal use to get a complete magnet string,
+ * but the individual trackers will be used for the 'sources' field in Stremio.
  * @param {string} magnetUri - The original magnet URI.
  * @param {string[]} trackers - An array of tracker URLs.
  * @returns {string} - The magnet URI with appended trackers.
@@ -211,8 +213,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.5', // Increment version for syntax fix
-        name: 'Jackett Direct Torrents (Syntax Fix)',
+        version: '1.0.6', // Increment version for Stremio stream object fix
+        name: 'Jackett Direct Torrents (Stremio Fix)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -394,24 +396,24 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
 
         const streams = torrents.map(torrent => {
-            let magnetLink = torrent.link;
-            if (trackers.length > 0) {
-                magnetLink = appendTrackersToMagnet(magnetLink, trackers);
-            }
-
-            const infoHash = getInfoHashFromMagnet(magnetLink);
+            const infoHash = getInfoHashFromMagnet(torrent.link);
             if (!infoHash) {
                 console.warn(`[STREAM ERROR] Could not extract infoHash for torrent: ${torrent.title}. Skipping stream.`);
                 return null; // Skip this stream if infoHash is not found
             }
 
-            console.log(`[STREAM OUTPUT] Processing torrent "${torrent.title}". Final Magnet Link: ${magnetLink ? magnetLink.substring(0, 100) + '...' : 'N/A'}, InfoHash: ${infoHash}`);
+            // Prepare sources array for Stremio
+            const streamSources = trackers.map(t => `tracker:${t}`);
+            streamSources.push(`dht:${infoHash}`); // Add DHT source
+
+            console.log(`[STREAM OUTPUT] Processing torrent "${torrent.title}". InfoHash: ${infoHash}, Sources: ${JSON.stringify(streamSources)}`);
 
             return {
                 name: 'Jackett', // Display name of the addon
                 title: `${torrent.title} (${torrent.seeders} Seeders)`,
-                url: magnetLink,
-                infoHash: infoHash // Explicitly include infoHash
+                infoHash: infoHash, // Explicitly include infoHash
+                sources: streamSources // Provide trackers and DHT as sources
+                // fileIdx: (optional, Stremio picks largest if not specified)
             };
         }).filter(s => s !== null); // Filter out any null streams (where infoHash extraction failed)
 
@@ -419,7 +421,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         res.json({ streams });
     } catch (error) {
         console.error('[GLOBAL ERROR] Error in /stream endpoint:', error.message);
-        // Corrected line: removed the duplicate 'error:'
         res.status(500).json({ streams: [], error: error.message });
     }
 });
@@ -435,3 +436,5 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
+
+
