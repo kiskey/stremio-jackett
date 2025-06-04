@@ -1,7 +1,7 @@
 // package.json
 {
   "name": "stremio-jackett-addon",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Stremio addon to search Jackett for direct torrents.",
   "main": "server.js",
   "scripts": {
