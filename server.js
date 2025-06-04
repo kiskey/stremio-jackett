@@ -5,9 +5,14 @@ const express = require('express');
 const axios = require('axios');
 const xml2js = require('xml2js');
 const { URLSearchParams } = require('url');
+const cors = require('cors'); // Import the cors middleware
 
 const app = express();
 const PORT = process.env.PORT || 80;
+
+// Enable CORS for all origins
+// This is crucial for Stremio to be able to fetch resources from your addon.
+app.use(cors());
 
 // Global cache for trackers
 let cachedTrackers = [];
@@ -196,8 +201,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.1', // Increment version
-        name: 'Jackett Direct Torrents (Enhanced)',
+        version: '1.0.2', // Increment version for this fix
+        name: 'Jackett Direct Torrents (CORS Fix)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -403,3 +408,5 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
+
+
