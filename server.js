@@ -51,6 +51,9 @@ let cachedTrackers = [];
 let lastTrackerFetch = 0;
 const TRACKER_CACHE_DURATION = 1 * 60 * 60 * 1000; // 1 hour in milliseconds
 
+// --- New: Internal limit for Jackett fetch to ensure enough results for filtering ---
+const JACKETT_FETCH_LIMIT = 50; // Fetch top 50 results from Jackett before applying relevance filter
+
 /**
  * Extracts the info hash from a magnet URI.
  * @param {string} magnetUri - The magnet URI.
@@ -161,13 +164,13 @@ async function parseJackettResponse(xmlString) {
  * @param {string} config.jackettApiKey - Jackett API key.
  * @param {string[]} config.queries - An array of search queries (titles, IDs).
  * @param {number} [config.year] - The release year (optional).
- * @param {number} [config.maxResults=20] - Maximum number of results to return.
+ * @param {number} [config.internalMaxResults] - Internal maximum number of results to return from Jackett.
  * @param {number} [config.filterBySeeders=0] - Minimum number of seeders.
  * @param {string} [config.sortBy='publishAt'] - Sort order ('publishAt' or 'seeders').
  * @returns {Promise<Array<Object>>} - A promise that resolves to an array of filtered and sorted torrents.
  */
 async function searchJackett(config) {
-    const { jackettHost, jackettApiKey, queries, year, maxResults = 20, filterBySeeders = 0, sortBy = 'publishAt' } = config;
+    const { jackettHost, jackettApiKey, queries, year, internalMaxResults, filterBySeeders = 0, sortBy = 'publishAt' } = config;
 
     if (!jackettHost || !jackettApiKey) {
         throw new Error('Jackett host and API key must be provided.');
@@ -192,9 +195,13 @@ async function searchJackett(config) {
         if (year) {
             searchParams.append('year', year);
         }
+        if (internalMaxResults) {
+            searchParams.append('limit', internalMaxResults); // Use 'limit' for Jackett's max results
+        }
+
 
         const jackettUrl = `${jackettHost.replace(/\/+$/, '')}/api/v2.0/indexers/all/results/torznab/api?${searchParams.toString()}`;
-        log('debug', `Searching Jackett with query "${q}" and year "${year || 'N/A'}": ${jackettUrl}`);
+        log('debug', `Searching Jackett with query "${q}" and year "${year || 'N/A'}", limit ${internalMaxResults || 'N/A'}: ${jackettUrl}`);
 
         try {
             const response = await axios.get(jackettUrl);
@@ -222,8 +229,8 @@ async function searchJackett(config) {
         filteredTorrents.sort((a, b) => (b.publishAt?.getTime() || 0) - (a.publishAt?.getTime() || 0)); // Descending publishAt
     }
 
-    // Apply maxResults
-    return filteredTorrents.slice(0, Math.min(maxResults, 20)); // Ensure maxResults doesn't exceed 20
+    // Note: maxResults for display is applied AFTER this function in the stream endpoint
+    return filteredTorrents;
 }
 
 /**
@@ -320,8 +327,8 @@ app.get('/manifest.json', (req, res) => {
 
     const manifest = {
         id: 'org.stremio.jackettaddon',
-        version: '1.0.8', // Increment version for relevance filtering
-        name: 'Jackett Direct Torrents (Relevance Filter)',
+        version: '1.0.9', // Increment version for improved filtering logic
+        name: 'Jackett Direct Torrents (Improved Filtering)',
         description: 'Stremio addon to search Jackett for direct torrents with flexible configuration and metadata resolution.',
         resources: ['stream'],
         types: ['movie', 'series'],
@@ -534,19 +541,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             jackettApiKey,
             queries: jackettQueries, // Pass the array of queries
             year: resolvedMetadata.resolvedYear, // Pass resolved year if available
-            maxResults: parsedMaxResults,
+            internalMaxResults: JACKETT_FETCH_LIMIT, // Use internal limit for Jackett fetch
             filterBySeeders: parsedFilterBySeeders,
             sortBy
         };
 
         let torrents = await searchJackett(jackettConfig);
-        log('info', `[JACKETT RESULTS] Found ${torrents.length} initial torrents from Jackett.`);
+        log('info', `[JACKETT RESULTS] Found ${torrents.length} initial torrents from Jackett (fetched up to ${JACKETT_FETCH_LIMIT}).`);
         torrents.forEach((t, i) => log('debug', `  Initial Torrent ${i + 1}: ${t.title} (Seeders: ${t.seeders}, Link: ${t.link ? t.link.substring(0, 60) + '...' : 'N/A'})`));
 
         // --- Post-filtering based on resolved metadata ---
         if (resolvedMetadata.resolvedTitle || resolvedMetadata.resolvedYear) {
             const relevantTorrents = torrents.filter(torrent => isTorrentRelevant(torrent, resolvedMetadata));
-            log('info', `[RELEVANCE FILTER] Filtered ${torrents.length - relevantTorrents.length} irrelevant torrents. Remaining: ${relevantTorrents.length}`);
+            log('info', `[RELEVANCE FILTER] Filtered ${torrents.length - relevantTorrents.length} irrelevant torrents. Remaining relevant: ${relevantTorrents.length}`);
             torrents = relevantTorrents;
         } else {
             log('info', '[RELEVANCE FILTER] No resolved metadata, skipping relevance filter.');
@@ -576,9 +583,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             };
         }).filter(s => s !== null); // Filter out any null streams (where infoHash extraction failed)
 
-        log('info', `[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio.`);
-        log('debug', `[STREMIO RESPONSE] Full streams array:`, JSON.stringify(streams, null, 2));
-        res.json({ streams });
+        // --- Apply user's maxResults after all filtering and processing ---
+        const finalStreams = streams.slice(0, parsedMaxResults);
+        log('info', `[STREMIO RESPONSE] Sending ${finalStreams.length} streams to Stremio (limited by user's maxResults of ${parsedMaxResults}).`);
+        log('debug', `[STREMIO RESPONSE] Full streams array:`, JSON.stringify(finalStreams, null, 2));
+        res.json({ streams: finalStreams });
     } catch (error) {
         log('error', '[GLOBAL ERROR] Error in /stream endpoint:', error.message);
         res.status(500).json({ streams: [], error: error.message });
@@ -596,3 +605,4 @@ app.listen(PORT, () => {
     // Initial fetch of trackers on startup
     fetchTrackers(process.env.TRACKER_GITHUB_URL || '');
 });
+
